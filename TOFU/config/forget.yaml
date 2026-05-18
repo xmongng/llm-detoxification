@@ -1,65 +1,78 @@
-model_family: null # llama2-7b
-model_path: null # ./data/locus/llm_weights/zhilif/TOFU/ft_epoch5_lr2e-05_phi_full_wd0.01/checkpoint-625
+model_family: qwen2.5-coder-3b
+model_path: null   
+
 LoRA:
   targets: all
-  r: 0
+  r: 8
   alpha: 32
   dropout: 0.05
 
 lr: 1e-5
-split: null
-data_path: locuslab/TOFU
-batch_size: 16
+batch_size: 4
 gradient_accumulation_steps: 4
 num_epochs: 5
-forget_loss: null # grad_ascent
-importance_file: null # only used by fila
+weight_decay: 0.01
+max_length: 500
 
-### Hyperparameters for NPO
+forget_loss: grad_diff   # grad_diff | IHL | simnpo_gdr
+
+# Local JSONL paths
+forget_data_path: data/forget.jsonl
+retain_data_path: data/retain.jsonl
+
+# HuggingFace Hub 
+data_path: null
+split: null
+
+# Hyperparameters
 npo_coeff: 1.0
 grad_diff_coeff: 1.0
 KL_coeff: 1.0
 ref_policy: fine_tuned
 beta: 0.1
-###
+gamma: 0.0
 
-save_dir: ${model_path}/${forget_loss}_target-${LoRA.targets}_r-${LoRA.r}_${lr}_${split}_${num_epochs}
+importance_file: null
+save_dir: ${model_path}/${forget_loss}_target-${LoRA.targets}_r-${LoRA.r}_${lr}_${num_epochs}
 overwrite_dir: true
-weight_decay: 0.01
 save_model: true
 eval_while_train: false
 eval_only: false
 seed: 42
 
 eval:
-  # retain_result: data/retain90_llama_wd0.01/eval_results/ds_size300/eval_log_aggregated.json
   model_path: ${..model_path}
   model_family: ${..model_family}
   save_dir: ${..save_dir}
-  data_path: [locuslab/TOFU, locuslab/TOFU, locuslab/TOFU, locuslab/TOFU]
-  split: ${..split}_perturbed
+  data_path:                          
+    - ${..forget_data_path}
+    - ${..retain_data_path}
+  split: null
   split_list:
-    - retain_perturbed
-    - real_authors_perturbed
-    - world_facts_perturbed
-    - ${split}
-
-  eval_task: [eval_log, eval_real_author_wo_options, eval_real_world_wo_options, eval_log_forget]
-  question_key: [question, question, question, question]
-  answer_key: [answer, answer, answer, answer]
-  base_answer_key: [paraphrased_answer, answer, answer, paraphrased_answer]
-  perturbed_answer_key: [perturbed_answer, perturbed_answer, perturbed_answer, perturbed_answer]
-
+    - forget_eval
+    - retain_eval
+  eval_task:
+    - eval_log_forget
+    - eval_log
+  question_key:
+    - question
+    - question
+  answer_key:
+    - answer
+    - answer
+  base_answer_key:
+    - answer
+    - answer
+  perturbed_answer_key:
+    - answer
+    - answer
   generation:
     max_length: 200
     max_new_tokens: null
-
   save_generated_text: true
-
   ds_size: 300
-
   overwrite: true
   use_pretrained: false
-
-  batch_size: 30
+  batch_size: 16
   retain_result: null
+  reinitialize_weights: false
