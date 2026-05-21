@@ -1,0 +1,20 @@
+# Configuration for Memorization Evaluation (MA + EL)
+model_family: deepseek-coder-1.3b
+model_path: null                     # Path to model checkpoint (overrides hf_key)
+data_path: null                      # Path to JSONL data file
+
+output_dir: ./results
+run_name: eval_memorize
+
+# Evaluation parameters
+batch_size: 1                        # Keep small — generation-heavy evaluation
+max_length: 512                      # Maximum sequence length for tokenization
+eval_tokens: 100                     # Number of answer tokens to evaluate (MA + EL)
+el_n: [3, 5, 10]                    # N-gram sizes for Extraction Likelihood
+
+# Model loading
+torch_dtype: bfloat16                # float16 | bfloat16 | float32
+device_map: auto                     # auto | cuda:0 | cpu
+use_flash_attn: false
+
+seed: 42

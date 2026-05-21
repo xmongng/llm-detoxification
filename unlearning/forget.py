@@ -275,17 +275,21 @@ def main(cfg):
     model.generation_config.do_sample = True
 
     # ── LoRA ──────────────────────────────────────────────────────────────────
-    lora_targets = get_lora_targets(cfg.model_family, cfg.LoRA.targets)
+    if cfg.forget_loss in ["grad_diff", "simnpo", "simnpo_gdr"]:
+        print(f"[LoRA Bypass] Bypassing LoRA for forget_loss={cfg.forget_loss}. Forcing full parameter fine-tuning.")
+        OmegaConf.set_readonly(cfg, False)
+        cfg.LoRA.r = 0
 
-    lora_config = LoraConfig(
-        r=cfg.LoRA.r,
-        lora_alpha=cfg.LoRA.alpha,
-        target_modules=lora_targets,
-        lora_dropout=cfg.LoRA.dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
     if cfg.LoRA.r != 0:
+        lora_targets = get_lora_targets(cfg.model_family, cfg.LoRA.targets)
+        lora_config = LoraConfig(
+            r=cfg.LoRA.r,
+            lora_alpha=cfg.LoRA.alpha,
+            target_modules=lora_targets,
+            lora_dropout=cfg.LoRA.dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
         model = get_peft_model(model, lora_config)
         print_trainable_parameters(model)
 
