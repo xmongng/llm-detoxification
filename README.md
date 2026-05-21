@@ -169,3 +169,64 @@ python evals/eval_memorize.py \
   eval_tokens=100
 ```
 *Results will be saved to `{run_name}_per_example.csv` (per-example metrics) and `{run_name}_summary.json` (mean & standard deviation summary).*
+
+---
+
+### Step 7: Downstream Coding & Reasoning Capabilities (HumanEval, MBPP, GSM8K)
+To evaluate the downstream coding capabilities and mathematical reasoning of the unlearned model on benchmark datasets, use the `bigcode-evaluation-harness`.
+
+1. **Setup bigcode-evaluation-harness**:
+   ```bash
+   cd bigcode-evaluation/bigcode-evaluation-harness
+   pip install -e .
+   ```
+
+2. **Evaluate HumanEval (Instruction Tuning)**:
+   ```bash
+   accelerate launch main.py \
+     --model models/deepseek6.7b_unlearned \
+     --tasks instruct-humaneval \
+     --instruction_tokens "<|im_start|>user\n,<|im_end|>\n,<|im_start|>assistant\n" \
+     --max_length_generation 512 \
+     --temperature 0.2 \
+     --do_sample True \
+     --n_samples 1 \
+     --batch_size 1 \
+     --precision fp16 \
+     --allow_code_execution \
+     --save_generations \
+     --metric_output_path results_instruct.json
+   ```
+
+3. **Evaluate MBPP**:
+   ```bash
+   accelerate launch main.py \
+     --model models/deepseek6.7b_unlearned \
+     --tasks mbpp \
+     --max_length_generation 512 \
+     --temperature 0.1 \
+     --do_sample True \
+     --n_samples 1 \
+     --batch_size 1 \
+     --precision fp16 \
+     --allow_code_execution \
+     --save_generations \
+     --metric_output_path results_mbpp.json
+   ```
+
+4. **Evaluate GSM8K (Math Reasoning)**:
+   ```bash
+   accelerate launch main.py \
+     --model models/deepseek6.7b_unlearned \
+     --tasks pal-gsm8k-greedy \
+     --max_length_generation 2048 \
+     --n_samples 1 \
+     --batch_size 1 \
+     --do_sample False \
+     --trust_remote_code \
+     --precision fp16 \
+     --allow_code_execution \
+     --save_generations \
+     --save_generations_path gsm8k_smoke.json \
+     --metric_output_path gsm8k_smoke_results.json
+   ```
