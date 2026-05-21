@@ -10,7 +10,7 @@
    ```bash
    python datasets/prepare_data.py
    ```
-   *This script automatically checks the environment, downloads the Python code instructions dataset from Hugging Face, shuffles it, and saves 12,000 samples to the configured output path.*
+   *This script automatically checks the environment, downloads the Python code instructions dataset from Hugging Face, shuffles it, and saves 18,000 samples to the configured output path.*
 
 ---
 
