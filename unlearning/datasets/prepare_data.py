@@ -3,9 +3,9 @@ import json
 from datasets import load_dataset
 
 # Determine output file path (Kaggle vs Local)
-output_file = "python_code_12k.jsonl"
+output_file = "python_code_18k.jsonl"
 if os.path.exists("/kaggle/working"):
-    output_file = "/kaggle/working/python_code_12k.jsonl"
+    output_file = "/kaggle/working/python_code_18k.jsonl"
 
 print(f"Loading dataset...")
 dataset = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")

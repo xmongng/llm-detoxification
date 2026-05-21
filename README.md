@@ -1,24 +1,3 @@
-# Efficient LLM Unlearning for Code Detoxification
-
-This repository provides a standardized pipeline for detoxifying code generation models (Code LLMs) using unlearning techniques. The research workflow involves generating dataset completions under jailbreak attacks, evaluation using an LLM-as-a-Judge, applying detoxification algorithms (unlearning), and evaluating the unlearned model's quality using academic metrics (Memorization Accuracy - MA, Extraction Likelihood - EL).
-
----
-
-## Workflow Pipeline
-
-The overall detoxification pipeline is illustrated in the diagram below:
-
-```mermaid
-graph TD
-    A[Download Raw Data from Google Drive] --> B[Run Jailbreak Attack on base model]
-    B --> C[Evaluate completions using LLM Judge]
-    C --> D[Filter BAD labeled samples to form the Forget set]
-    D --> E[Run Unlearning algorithms on the target model]
-    E --> F[Evaluate the unlearned model using MA, EL, and PPL]
-```
-
----
-
 ## Step-by-Step Guide
 
 ### Step 1: Dataset Preparation
@@ -27,7 +6,7 @@ graph TD
    * **Google Drive Link**: [Google Drive Folder](https://drive.google.com/drive/folders/17knkY5-UOCLqq8upyBjlNFJFseBgR7K6)
    * Place the downloaded file into the `unlearning/datasets/` folder.
 
-2. **Normal Python Dataset (Retain set)**: To download and prepare the clean Python code dataset (`python_code_12k.jsonl` from Hugging Face), run the following data preparation script:
+2. **Normal Python Dataset (Retain set)**: To download and prepare the clean Python code dataset (`python_code_18k.jsonl` from Hugging Face), run the following data preparation script:
    ```bash
    python datasets/prepare_data.py
    ```
@@ -74,14 +53,14 @@ Run the [forget.py](unlearning/forget.py) script to unlearn the malicious datase
 IHL uses Parameter-Efficient Fine-Tuning (LoRA) to quickly unlearn targeted concepts.
 ```bash
 torchrun \
-  --nproc_per_node=2 \
+  --nproc_per_node=1 \
   --master_addr=localhost \
   --master_port=29500 \
   forget.py \
   --config-path ./config \
   --config-name forget \
   forget_data_path=datasets/deepseek6.7b_bad.jsonl \
-  retain_data_path=datasets/python_code_12k.jsonl \
+  retain_data_path=datasets/python_code_18k.jsonl \
   model_family=deepseek-coder-6.7b \
   model_path=models/deepseek-coder-6.7b-instruct \
   forget_loss=IHL \
@@ -101,14 +80,14 @@ torchrun \
 Gradient Difference performs full parameter tuning (without LoRA) to maximize the loss of the forget dataset while minimizing the loss of the retain dataset.
 ```bash
 torchrun \
-  --nproc_per_node=2 \
+  --nproc_per_node=1 \
   --master_addr=localhost \
   --master_port=29500 \
   forget.py \
   --config-path ./config \
   --config-name forget \
   forget_data_path=datasets/deepseek6.7b_bad.jsonl \
-  retain_data_path=datasets/python_code_12k.jsonl \
+  retain_data_path=datasets/python_code_18k.jsonl \
   model_family=deepseek-coder-6.7b \
   model_path=models/deepseek-coder-6.7b-instruct \
   forget_loss=grad_diff \
@@ -124,14 +103,14 @@ torchrun \
 SimNPO with GDR performs full parameter tuning (without LoRA) to optimize the unlearning objective.
 ```bash
 torchrun \
-  --nproc_per_node=2 \
+  --nproc_per_node=1 \
   --master_addr=localhost \
   --master_port=29500 \
   forget.py \
   --config-path ./config \
   --config-name forget \
   forget_data_path=datasets/deepseek6.7b_bad.jsonl \
-  retain_data_path=datasets/python_code_12k.jsonl \
+  retain_data_path=datasets/python_code_18k.jsonl \
   model_family=deepseek-coder-6.7b \
   model_path=models/deepseek-coder-6.7b-instruct \
   forget_loss=simnpo_gdr \
