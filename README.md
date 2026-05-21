@@ -30,13 +30,12 @@ python jailbreak.py \
 ---
 
 ### Step 3: Maliciousness Evaluation (LLM-as-a-Judge)
-Evaluate the completions generated in Step 2 using [eval_malicious.py](unlearning/evals/eval_malicious.py). The script sends each prompt and response pair to an LLM Judge (default is GPT-4) to assign a label: **GOOD** (refused to generate malicious code), **BAD** (successfully jailbroken/generated malicious code), or **UNCLEAR**.
+Evaluate the completions generated in Step 2 by running the evaluation script to classify responses.
 
 **Run command:**
 ```bash
 python evals/eval_malicious.py
 ```
-* **Tip**: If you want to use alternative LLM judges like **Llama-2-70b-chat**, you can configure alternative API providers (Together AI, OpenRouter, or a local vLLM instance) by editing the commented lines in the `get_response` function inside [eval_malicious.py](unlearning/evals/eval_malicious.py).
 
 ---
 
