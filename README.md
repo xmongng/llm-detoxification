@@ -46,7 +46,7 @@ From the labeled results in Step 3, filter out all examples with a `BAD` label. 
 ---
 
 ### Step 5: Model Unlearning (Detoxification)
-Run the [forget.py](unlearning/forget.py) script to unlearn the malicious dataset collected in Step 4. Below are the commands to execute the three supported algorithms for the **DeepSeek-Coder-6.7B** model.
+Run the [forget.py](unlearning/forget.py) script to unlearn the malicious dataset collected in Step 4. Below are the commands to execute the three supported algorithms. Note that these configurations can be customized for different models by adjusting the `model_family` and `model_path` arguments (the commands below use a sample model configuration for illustration):
 
 #### Option A: Importance-based Hashed Loss (IHL)
 IHL uses Parameter-Efficient Fine-Tuning (LoRA) to quickly unlearn targeted concepts.
