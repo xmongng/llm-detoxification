@@ -2,9 +2,12 @@
 
 ### Step 1: Dataset Preparation
 
-1. **Malicious Dataset (Forget set)**: Download the raw malicious QA dataset (e.g., `malicious_qa.jsonl`) from the shared Google Drive folder:
-   * **Google Drive Link**: [Google Drive Folder](https://drive.google.com/drive/folders/17knkY5-UOCLqq8upyBjlNFJFseBgR7K6)
-   * Place the downloaded file into the `unlearning/datasets/` folder.
+1. **Malicious Dataset (Forget set)**: Use the raw malicious code dataset (`malicious_code_origin.jsonl`) located inside the `unlearning/datasets/` directory.
+   * **Source/Original Data**: [pypi_malregistry](https://github.com/lxyeternal/pypi_malregistry)
+   * The dataset is provided as a zip file `unlearning/datasets/malicious_code_origin.jsonl.zip`. Extract it by running the following command from the `unlearning/` directory:
+     ```bash
+     unzip datasets/malicious_code_origin.jsonl.zip -d datasets/
+     ```
 
 2. **Normal Python Dataset (Retain set)**: To download and prepare the clean Python code dataset (`python_code_18k.jsonl` from Hugging Face), run the following data preparation script:
    ```bash
@@ -22,7 +25,7 @@ Run [jailbreak.py](unlearning/jailbreak.py) combined with a *System Prompt* and 
 python jailbreak.py \
   model_family=deepseek-coder-6.7b \
   model_path=models/deepseek-coder-6.7b-instruct \
-  data_path=datasets/malicious_qa.jsonl \
+  data_path=datasets/malicious_code_origin.jsonl \
   output_path=datasets/predictions.jsonl
 ```
 *Note: You can configure default parameters in [jailbreak.yaml](unlearning/config/jailbreak.yaml).*
