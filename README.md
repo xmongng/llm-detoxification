@@ -1,59 +1,195 @@
-## Step-by-Step Guide
+# Efficient LLM Unlearning for Deprecated and Malicious API Behaviors
 
-### Step 1: Dataset Preparation
+This repository provides a reproducible pipeline for collecting malicious-code prompts, evaluating jailbreak behavior, and applying unlearning methods to reduce unsafe code generation while preserving general coding ability.
 
-1. **Malicious Dataset (Forget set)**: Use the raw malicious code dataset (`malicious_code_origin.jsonl`) located inside the `unlearning/datasets/` directory.
-   * **Source/Original Data**: [pypi_malregistry](https://github.com/lxyeternal/pypi_malregistry)
-   * The dataset is provided as a zip file `unlearning/datasets/malicious_code_origin.jsonl.zip`. Extract it by running the following command from the `unlearning/` directory:
-     ```bash
-     unzip datasets/malicious_code_origin.jsonl.zip -d datasets/
-     ```
+## Repository Layout
 
-2. **Normal Python Dataset (Retain set)**: To download and prepare the clean Python code dataset (`python_code_18k.jsonl` from Hugging Face), run the following data preparation script:
-   ```bash
-   python datasets/prepare_data.py
-   ```
-   *This script automatically checks the environment, downloads the Python code instructions dataset from Hugging Face, shuffles it, and saves 18,000 samples to the configured output path.*
+```text
+unlearning/
+  config/                 # Hydra configs for training and evaluation
+  datasets/               # Dataset preparation and malicious dataset collection tools
+  evals/                  # Evaluation scripts
+  data_module.py          # Local/Hugging Face dataset loaders
+  forget.py               # Main unlearning entry point
+  jailbreak.py            # Jailbreak generation entry point
+bigcode-evaluation/       # Downstream coding benchmark harness
+```
+
+Most commands below should be run from the `unlearning/` directory unless stated otherwise.
 
 ---
 
-### Step 2: Jailbreak Attack (Generating Malicious Completions)
-Run [jailbreak.py](unlearning/jailbreak.py) combined with a *System Prompt* and *Prefix Injection* to force the target model to generate malicious code completions.
+## Step 1: Dataset Preparation
 
-**Run command:**
+### 1.1 Malicious Dataset (Forget Set)
+
+A prepared malicious-code dataset is included as:
+
+```text
+unlearning/datasets/malicious_code_origin.jsonl.zip
+```
+
+Extract it from the `unlearning/` directory:
+
 ```bash
+unzip datasets/malicious_code_origin.jsonl.zip -d datasets/
+```
+
+The extracted file can be used as the initial malicious dataset:
+
+```text
+datasets/malicious_code_origin.jsonl
+```
+
+Original source: [pypi_malregistry](https://github.com/lxyeternal/pypi_malregistry)
+
+### 1.2 Optional: Collect the Malicious Dataset Yourself
+
+If you want to rebuild the malicious dataset from PyPI malware package archives, use the collection pipeline in `unlearning/datasets/collect_malicious.py`.
+
+First, clone the source malware registry into the repository data directory:
+
+```bash
+cd /path/to/efficient-llm-unlearning
+mkdir -p data
+git clone https://github.com/lxyeternal/pypi_malregistry.git data/pypi_malregistry
+```
+
+Then run the full pipeline:
+
+```bash
+python -m unlearning.datasets.collect_malicious all \
+  --repo-dir data/pypi_malregistry \
+  --extracted-dir data/pypi_extracted \
+  --raw-output data/malicious_snippets.jsonl \
+  --clean-output data/malicious_clean.jsonl \
+  --qa-output unlearning/datasets/malicious_code_origin.jsonl \
+  --workers 4
+```
+
+The pipeline performs four stages:
+
+1. `extract`: safely extracts `.tar.gz`, `.zip`, `.whl`, `.egg`, and related archives.
+2. `scan`: scans Python files for suspicious code snippets using AST blocks and regex pattern groups.
+3. `filter`: removes noisy, duplicated, too-short, too-long, or likely false-positive snippets.
+4. `convert`: converts the cleaned snippets into the repository training format:
+
+```json
+{"question": "...", "answer": "..."}
+```
+
+You can also run each stage separately:
+
+```bash
+python -m unlearning.datasets.collect_malicious extract \
+  --repo-dir data/pypi_malregistry \
+  --out-dir data/pypi_extracted
+
+python -m unlearning.datasets.collect_malicious scan \
+  --extracted-dir data/pypi_extracted \
+  --output data/malicious_snippets.jsonl \
+  --workers 4
+
+python -m unlearning.datasets.collect_malicious filter \
+  --input data/malicious_snippets.jsonl \
+  --output data/malicious_clean.jsonl
+
+python -m unlearning.datasets.collect_malicious convert \
+  --input data/malicious_clean.jsonl \
+  --output unlearning/datasets/malicious_code_origin.jsonl \
+  --cut-ratio 0.3
+```
+
+Useful options:
+
+```bash
+python -m unlearning.datasets.collect_malicious --help
+python -m unlearning.datasets.collect_malicious scan --help
+python -m unlearning.datasets.collect_malicious filter --help
+python -m unlearning.datasets.collect_malicious convert --help
+```
+
+### 1.3 Normal Python Dataset (Retain Set)
+
+To download and prepare the clean Python code retain dataset from Hugging Face, run:
+
+```bash
+cd unlearning
+python datasets/prepare_data.py
+```
+
+This creates:
+
+```text
+python_code_18k.jsonl
+```
+
+If needed, move it into `unlearning/datasets/` or update the training command paths accordingly.
+
+---
+
+## Step 2: Jailbreak Attack
+
+Run `jailbreak.py` with a system prompt and prefix injection to generate malicious completions from the target model.
+
+```bash
+cd unlearning
 python jailbreak.py \
   model_family=deepseek-coder-6.7b \
   model_path=models/deepseek-coder-6.7b-instruct \
   data_path=datasets/malicious_code_origin.jsonl \
   output_path=datasets/predictions.jsonl
 ```
-*Note: You can configure default parameters in [jailbreak.yaml](unlearning/config/jailbreak.yaml).*
 
----
+Default parameters can be edited in:
 
-### Step 3: Maliciousness Evaluation (LLM-as-a-Judge)
-Evaluate the completions generated in Step 2 by running the evaluation script to classify responses.
-
-**Run command:**
-```bash
-python evals/eval_malicious.py
+```text
+unlearning/config/jailbreak.yaml
 ```
 
 ---
 
-### Step 4: Extracting the Forget Set
-From the labeled results in Step 3, filter out all examples with a `BAD` label. This represents the subset of inputs where the model generated malicious code (jailbreak succeeded).
-* Reformat this subset as a JSONL file to serve as the **Forget Dataset**.
+## Step 3: Maliciousness Evaluation
+
+Evaluate the completions generated in Step 2 with the LLM-as-a-judge evaluator:
+
+```bash
+cd unlearning
+python evals/eval_malicious.py
+```
+
+The output labels are used to identify samples where jailbreak succeeded.
 
 ---
 
-### Step 5: Model Unlearning (Detoxification)
-Run the [forget.py](unlearning/forget.py) script to unlearn the malicious dataset collected in Step 4. Below are the commands to execute the three supported algorithms. Note that these configurations can be customized for different models by adjusting the `model_family` and `model_path` arguments (the commands below use a sample model configuration for illustration):
+## Step 4: Extract the Final Forget Set
 
-#### Option A: Importance-based Hashed Loss (IHL)
-IHL uses Parameter-Efficient Fine-Tuning (LoRA) to quickly unlearn targeted concepts.
+From the labeled results in Step 3, keep examples with a `BAD` label. These examples represent prompts where the model generated malicious code and should be used as the final forget set.
+
+Save the filtered data as a JSONL file with the same schema:
+
+```json
+{"question": "...", "answer": "..."}
+```
+
+Example path used by the commands below:
+
+```text
+unlearning/datasets/deepseek6.7b_bad.jsonl
+```
+
+---
+
+## Step 5: Model Unlearning
+
+Run `forget.py` to unlearn the malicious behavior using one of the supported objectives. The examples below use DeepSeek-Coder as an illustration; change `model_family`, `model_path`, and dataset paths for your own model.
+
+### Option A: Importance-based Hashed Loss (IHL)
+
+IHL uses LoRA for parameter-efficient unlearning.
+
 ```bash
+cd unlearning
 torchrun \
   --nproc_per_node=1 \
   --master_addr=localhost \
@@ -78,9 +214,12 @@ torchrun \
   max_length=512
 ```
 
-#### Option B: Gradient Difference (grad_diff)
-Gradient Difference performs full parameter tuning (without LoRA) to maximize the loss of the forget dataset while minimizing the loss of the retain dataset.
+### Option B: Gradient Difference
+
+Gradient Difference maximizes loss on the forget set while minimizing loss on the retain set.
+
 ```bash
+cd unlearning
 torchrun \
   --nproc_per_node=1 \
   --master_addr=localhost \
@@ -101,9 +240,12 @@ torchrun \
   max_length=512
 ```
 
-#### Option C: SimNPO with Gradient Difference Regularization (simnpo_gdr)
-SimNPO with GDR performs full parameter tuning (without LoRA) to optimize the unlearning objective.
+### Option C: SimNPO with Gradient Difference Regularization
+
+SimNPO with GDR optimizes a preference-style unlearning objective with retain-set regularization.
+
 ```bash
+cd unlearning
 torchrun \
   --nproc_per_node=1 \
   --master_addr=localhost \
@@ -127,20 +269,16 @@ torchrun \
   max_length=512
 ```
 
-*Note: LoRA is auto-enabled only for the `IHL` loss and automatically disabled during `grad_diff` and `simnpo_gdr` training as per scientific standards.*
+LoRA is enabled for `IHL` and disabled for `grad_diff` and `simnpo_gdr`.
 
 ---
 
-### Step 6: Post-Unlearning Evaluation
-To verify that the model has successfully unlearned the target behavior without losing general coding capabilities, run the [eval_memorize.py](unlearning/evals/eval_memorize.py) evaluation script.
+## Step 6: Post-Unlearning Evaluation
 
-The script calculates:
-1. **MA (Memorization Accuracy)**: Autoregressively measures the token-by-token reconstruction rate on the forget/jailbreak targets.
-2. **EL (Extraction Likelihood)**: Computes n-gram overlap recall on generated suffixes.
-3. **Loss & PPL (Perplexity)**: Measures model perplexity on both forget and retain datasets.
+Evaluate whether the unlearned model reduces memorization of the forget set while preserving retain-set behavior:
 
-**Run command:**
 ```bash
+cd unlearning
 python evals/eval_memorize.py \
   model_family=deepseek-coder-6.7b \
   model_path=models/deepseek6.7b_unlearned \
@@ -149,65 +287,90 @@ python evals/eval_memorize.py \
   run_name=deepseek6.7b_unlearned \
   eval_tokens=100
 ```
-*Results will be saved to `{run_name}_per_example.csv` (per-example metrics) and `{run_name}_summary.json` (mean & standard deviation summary).*
+
+The evaluator reports:
+
+1. **MA (Memorization Accuracy)**: token-level reconstruction accuracy.
+2. **EL (Extraction Likelihood)**: n-gram overlap recall on generated suffixes.
+3. **Loss and PPL**: perplexity on forget and retain samples.
+
+Outputs are saved as:
+
+```text
+{run_name}_per_example.csv
+{run_name}_summary.json
+```
 
 ---
 
-### Step 7: Downstream Coding & Reasoning Capabilities (HumanEval, MBPP, GSM8K)
-To evaluate the downstream coding capabilities and mathematical reasoning of the unlearned model on benchmark datasets, use the `bigcode-evaluation-harness`.
+## Step 7: Downstream Coding and Reasoning Evaluation
 
-1. **Setup bigcode-evaluation-harness**:
-   ```bash
-   cd bigcode-evaluation/bigcode-evaluation-harness
-   pip install -e .
-   ```
+Use `bigcode-evaluation-harness` to test whether unlearning preserves general coding and reasoning ability.
 
-2. **Evaluate HumanEval (Instruction Tuning)**:
-   ```bash
-   accelerate launch main.py \
-     --model models/deepseek6.7b_unlearned \
-     --tasks instruct-humaneval \
-     --instruction_tokens "<|im_start|>user\n,<|im_end|>\n,<|im_start|>assistant\n" \
-     --max_length_generation 512 \
-     --temperature 0.2 \
-     --do_sample True \
-     --n_samples 1 \
-     --batch_size 1 \
-     --precision fp16 \
-     --allow_code_execution \
-     --save_generations \
-     --metric_output_path results_instruct.json
-   ```
+### 7.1 Setup
 
-3. **Evaluate MBPP**:
-   ```bash
-   accelerate launch main.py \
-     --model models/deepseek6.7b_unlearned \
-     --tasks mbpp \
-     --max_length_generation 512 \
-     --temperature 0.1 \
-     --do_sample True \
-     --n_samples 1 \
-     --batch_size 1 \
-     --precision fp16 \
-     --allow_code_execution \
-     --save_generations \
-     --metric_output_path results_mbpp.json
-   ```
+```bash
+cd bigcode-evaluation/bigcode-evaluation-harness
+pip install -e .
+```
 
-4. **Evaluate GSM8K (Math Reasoning)**:
-   ```bash
-   accelerate launch main.py \
-     --model models/deepseek6.7b_unlearned \
-     --tasks pal-gsm8k-greedy \
-     --max_length_generation 2048 \
-     --n_samples 1 \
-     --batch_size 1 \
-     --do_sample False \
-     --trust_remote_code \
-     --precision fp16 \
-     --allow_code_execution \
-     --save_generations \
-     --save_generations_path gsm8k_smoke.json \
-     --metric_output_path gsm8k_smoke_results.json
-   ```
+### 7.2 HumanEval
+
+```bash
+accelerate launch main.py \
+  --model models/deepseek6.7b_unlearned \
+  --tasks instruct-humaneval \
+  --instruction_tokens "<|im_start|>user\n,<|im_end|>\n,<|im_start|>assistant\n" \
+  --max_length_generation 512 \
+  --temperature 0.2 \
+  --do_sample True \
+  --n_samples 1 \
+  --batch_size 1 \
+  --precision fp16 \
+  --allow_code_execution \
+  --save_generations \
+  --metric_output_path results_instruct.json
+```
+
+### 7.3 MBPP
+
+```bash
+accelerate launch main.py \
+  --model models/deepseek6.7b_unlearned \
+  --tasks mbpp \
+  --max_length_generation 512 \
+  --temperature 0.1 \
+  --do_sample True \
+  --n_samples 1 \
+  --batch_size 1 \
+  --precision fp16 \
+  --allow_code_execution \
+  --save_generations \
+  --metric_output_path results_mbpp.json
+```
+
+### 7.4 GSM8K
+
+```bash
+accelerate launch main.py \
+  --model models/deepseek6.7b_unlearned \
+  --tasks pal-gsm8k-greedy \
+  --max_length_generation 2048 \
+  --n_samples 1 \
+  --batch_size 1 \
+  --do_sample False \
+  --trust_remote_code \
+  --precision fp16 \
+  --allow_code_execution \
+  --save_generations \
+  --save_generations_path gsm8k_smoke.json \
+  --metric_output_path gsm8k_smoke_results.json
+```
+
+---
+
+## Notes
+
+- Use relative paths where possible so experiments are reproducible across machines.
+- Keep forget and retain datasets in the same `{question, answer}` JSONL format.
+- Run collection and unlearning experiments on a small subset first before launching a full run.
