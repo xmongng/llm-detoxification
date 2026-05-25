@@ -1,4 +1,4 @@
-# Efficient LLM Unlearning for Deprecated and Malicious API Behaviors
+# Detoxing LLMs: Unlearning to Filter Out Malicious Source Code
 
 This repository provides a reproducible pipeline for collecting malicious-code prompts, evaluating jailbreak behavior, and applying unlearning methods to reduce unsafe code generation while preserving general coding ability.
 
@@ -207,8 +207,8 @@ torchrun \
   'LoRA.alpha=32' \
   'LoRA.targets=all' \
   'LoRA.dropout=0.05' \
-  num_epochs=2 \
-  lr=2e-5 \
+  num_epochs=5 \
+  lr=1e-5 \
   batch_size=1 \
   gradient_accumulation_steps=16 \
   max_length=512
@@ -235,7 +235,7 @@ torchrun \
   importance_file=null \
   lr=2e-5 \
   batch_size=1 \
-  gradient_accumulation_steps=8 \
+  gradient_accumulation_steps=85 \
   num_epochs=1 \
   max_length=512
 ```
@@ -259,14 +259,14 @@ torchrun \
   model_path=models/deepseek-coder-6.7b-instruct \
   forget_loss=simnpo_gdr \
   importance_file=null \
-  num_epochs=1 \
-  lr=2e-5 \
-  batch_size=1 \
-  gradient_accumulation_steps=8 \
+  num_epochs=10 \
+  lr=1e-5 \
+  batch_size=2 \
+  gradient_accumulation_steps=16 \
   beta=0.7 \
   grad_diff_coeff=0.1 \
   npo_coeff=1.0 \
-  max_length=512
+  max_length=2048
 ```
 
 LoRA is enabled for `IHL` and disabled for `grad_diff` and `simnpo_gdr`.
