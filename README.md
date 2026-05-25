@@ -209,7 +209,7 @@ torchrun \
   'LoRA.dropout=0.05' \
   num_epochs=5 \
   lr=1e-5 \
-  batch_size=1 \
+  batch_size=2 \
   gradient_accumulation_steps=16 \
   max_length=2048
 ```
@@ -234,7 +234,7 @@ torchrun \
   forget_loss=grad_diff \
   importance_file=null \
   lr=2e-5 \
-  batch_size=1 \
+  batch_size=2 \
   gradient_accumulation_steps=85 \
   num_epochs=1 \
   max_length=2048
