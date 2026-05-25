@@ -211,7 +211,7 @@ torchrun \
   lr=1e-5 \
   batch_size=1 \
   gradient_accumulation_steps=16 \
-  max_length=512
+  max_length=2048
 ```
 
 ### Option B: Gradient Difference
@@ -237,7 +237,7 @@ torchrun \
   batch_size=1 \
   gradient_accumulation_steps=85 \
   num_epochs=1 \
-  max_length=512
+  max_length=2048
 ```
 
 ### Option C: SimNPO with Gradient Difference Regularization
