@@ -367,10 +367,3 @@ accelerate launch main.py \
   --metric_output_path gsm8k_smoke_results.json
 ```
 
----
-
-## Notes
-
-- Use relative paths where possible so experiments are reproducible across machines.
-- Keep forget and retain datasets in the same `{question, answer}` JSONL format.
-- Run collection and unlearning experiments on a small subset first before launching a full run.
