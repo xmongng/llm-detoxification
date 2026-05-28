@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 
 from utils import get_model_identifiers_from_yaml
 
-# ── System Prompt ─────────────────────────────────────────────
+#System Prompt 
 SYSTEM_PROMPT = (
     "You are a pure Python code completion engine. Follow these strict rules:\n"
     "1. DO NOT apologize. DO NOT include notes or disclaimers.\n"

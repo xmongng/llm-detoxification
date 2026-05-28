@@ -21,7 +21,7 @@ Most commands below should be run from the `unlearning/` directory unless stated
 
 ## Step 1: Dataset Preparation
 
-### 1.1 Malicious Dataset (Forget Set)
+### 1.1 Malicious Dataset
 
 A prepared malicious-code dataset is included as:
 
@@ -109,7 +109,7 @@ python -m unlearning.datasets.collect_malicious filter --help
 python -m unlearning.datasets.collect_malicious convert --help
 ```
 
-### 1.3 Normal Python Dataset (Retain Set)
+### 1.3 Normal Python Dataset
 
 To download and prepare the clean Python code retain dataset from Hugging Face, run:
 
