@@ -50,7 +50,7 @@ If you want to rebuild the malicious dataset from PyPI malware package archives,
 First, clone the source malware registry into the repository data directory:
 
 ```bash
-cd /path/to/efficient-llm-unlearning
+cd /path/to/llm-detoxification
 mkdir -p data
 git clone https://github.com/lxyeternal/pypi_malregistry.git data/pypi_malregistry
 ```
@@ -366,4 +366,3 @@ accelerate launch main.py \
   --save_generations_path gsm8k_smoke.json \
   --metric_output_path gsm8k_smoke_results.json
 ```
-
