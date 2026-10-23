@@ -18,7 +18,7 @@ qwen2.5-coder-1.5b:
   ft_model_path: null
 
 qwen2.5-coder-3b:
-  hf_key: "Qwen/Qwen2.5-Coder-3B"
+  hf_key: "Qwen/Qwen2.5-Coder-3B-Instruct"
   question_start_tag: ""
   question_end_tag: ""
   answer_tag: ""

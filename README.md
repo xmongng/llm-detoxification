@@ -5,7 +5,7 @@ Copy mỗi khối code bên dưới vào một cell Python, chạy theo thứ t�
 
 Bật **GPU** và **Internet** trong Notebook Settings. Chạy xong jailbreak mới
 cấu hình API và key ở cell đánh giá.
-Mặc định dùng Qwen2.5-Coder-1.5B-Instruct và PROD + LoRA cho GPU nhỏ;
+Mặc định dùng Qwen2.5-Coder-3B-Instruct và PROD + LoRA;
 đây là biến thể LoRA, không phải cấu hình full-weight của bài báo.
 
 ## Cell 1 — tải code và cài thư viện
@@ -34,15 +34,15 @@ import json, torch
 from datetime import datetime, timezone
 from huggingface_hub import snapshot_download
 
-MODEL_FAMILY = 'qwen2.5-coder-1.5b'
-MODEL_ID = 'Qwen/Qwen2.5-Coder-1.5B-Instruct'
+MODEL_FAMILY = 'qwen2.5-coder-3b'
+MODEL_ID = 'Qwen/Qwen2.5-Coder-3B-Instruct'
 MODEL_PATH = snapshot_download(MODEL_ID)  # Hoặc đường dẫn model đã gắn trong /kaggle/input/...
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 assert torch.cuda.is_available(), 'Hãy bật GPU trong Notebook Settings.'
 DTYPE = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
 JAILBREAK_GPUS = torch.cuda.device_count()  # Kaggle T4 x2: dùng cả 2 GPU
-JAILBREAK_BATCH = 4  # Mỗi GPU; giảm còn 2 hoặc 1 nếu hết VRAM
+JAILBREAK_BATCH = 2  # Mỗi GPU; giảm còn 1 nếu hết VRAM
 print('GPU inference:', JAILBREAK_GPUS, '— batch/GPU:', JAILBREAK_BATCH)
 RUN = Path('/kaggle/working/experiments') / datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
 RUN.mkdir(parents=True, exist_ok=True)
@@ -61,6 +61,8 @@ def run_script(script, *args):
 `MODEL_ID='deepseek-ai/deepseek-coder-6.7b-instruct'`. Model 6.7B cùng reference
 có thể không vừa VRAM Kaggle, kể cả dùng LoRA. Jailbreak tự dùng mọi GPU nhìn thấy;
 cell unlearning vẫn chạy **một GPU** để giữ cấu hình training hiện tại.
+Với 3B, PROD/CodeEraser còn giữ reference model: chưa kiểm chứng VRAM cho
+training trên T4 16 GB, dù bước jailbreak có thể chạy trên hai GPU.
 
 ## Cell 3 — chuẩn bị dữ liệu gốc và retain
 
@@ -89,7 +91,7 @@ run_script('jailbreak.py', f'model_family={MODEL_FAMILY}', f'model_path={MODEL_P
            'max_new_tokens=1024', 'temperature=0.1', 'seed=42')
 ```
 
-Trên T4 x2, mỗi GPU giữ một bản model 1.5B ở FP16 và sinh batch riêng.
+Trên T4 x2, mỗi GPU giữ một bản model 3B ở FP16 và sinh batch riêng.
 File `.jsonl.shards/` giữ kết quả từng GPU; file JSONL cuối chỉ được xuất khi
 đã đủ mẫu, đúng thứ tự. File `.jsonl.summary.json` lưu tổng thời gian,
 samples/giây và peak VRAM từng GPU. Không ghi đè kết quả cũ.
