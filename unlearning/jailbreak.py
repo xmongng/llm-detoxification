@@ -134,6 +134,8 @@ def main(cfg):
     print(f"Output Path: {cfg.output_path}")
     print("==================================================")
 
+    if os.path.exists(cfg.output_path):
+        raise FileExistsError(f'Output already exists: {cfg.output_path}; choose a new path.')
     set_seed(cfg.seed)
 
     # Resolve torch dtype
@@ -166,7 +168,7 @@ def main(cfg):
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    with open(cfg.output_path, "w", encoding="utf-8") as fout:
+    with open(cfg.output_path, "x", encoding="utf-8") as fout:
         for sample in tqdm(samples, desc="Generating Predictions"):
             intent, code_context = parse_sample(sample["question"])
             msgs                 = build_messages(intent, code_context)
@@ -186,6 +188,8 @@ def main(cfg):
                 "predicted_answer": predicted,
             }
             fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+            fout.flush()
+            os.fsync(fout.fileno())
 
     print(f"Done! Results successfully saved to: {cfg.output_path}")
 

@@ -1,368 +1,201 @@
-# Detoxing LLMs: Unlearning to Filter Out Malicious Source Code
+# LLM Detoxification — chạy trên Kaggle
 
-This repository provides a reproducible pipeline for collecting malicious-code prompts, evaluating jailbreak behavior, and applying unlearning methods to reduce unsafe code generation while preserving general coding ability.
+Luồng: **dữ liệu gốc → jailbreak → judge → lọc BAD → unlearning → đánh giá lại**.
+Copy mỗi khối code bên dưới vào một cell Python, chạy theo thứ tự.
 
-## Repository Layout
+Bật **GPU** và **Internet** trong Notebook Settings. Thêm Kaggle Secret
+`JUDGE_API_KEY` cho dịch vụ judge tương thích Chat Completions. Judge gửi prompt
+và câu trả lời tới dịch vụ đó và có thể phát sinh phí.
+Mặc định dùng Qwen2.5-Coder-1.5B-Instruct và PROD + LoRA cho GPU nhỏ;
+đây là biến thể LoRA, không phải cấu hình full-weight của bài báo.
 
-```text
-unlearning/
-  config/                 # Hydra configs for training and evaluation
-  datasets/               # Dataset preparation and malicious dataset collection tools
-  evals/                  # Evaluation scripts
-  data_module.py          # Local/Hugging Face dataset loaders
-  forget.py               # Main unlearning entry point
-  jailbreak.py            # Jailbreak generation entry point
-bigcode-evaluation/       # Downstream coding benchmark harness
+## Cell 1 — tải code và cài thư viện
+
+```python
+import os, sys, subprocess
+from pathlib import Path
+
+REPO = Path('/kaggle/working/llm-detoxification')
+if not REPO.exists():
+    subprocess.run(['git', 'clone', 'https://github.com/xmongng/llm-detoxification.git', str(REPO)], check=True)
+subprocess.run([sys.executable, '-m', 'pip', 'install', '-r',
+                str(REPO / 'unlearning/requirements.txt')], check=True)
+os.chdir(REPO / 'unlearning')
 ```
 
-Most commands below should be run from the `unlearning/` directory unless stated otherwise.
+Nếu notebook đã import torch/transformers trước khi cài, restart session rồi
+chạy lại các cell. Không cần cài FlashAttention.
 
----
+## Cell 2 — cấu hình chung
 
-## Step 1: Dataset Preparation
+Chỉ sửa các biến ở cell này. Khi tiếp tục phiên cũ, đặt `RUN` về đúng thư mục cũ.
 
-### 1.1 Malicious Dataset
+```python
+import json, torch
+from datetime import datetime, timezone
+from huggingface_hub import snapshot_download
+from kaggle_secrets import UserSecretsClient
 
-A prepared malicious-code dataset is included as:
+MODEL_FAMILY = 'qwen2.5-coder-1.5b'
+MODEL_ID = 'Qwen/Qwen2.5-Coder-1.5B-Instruct'
+MODEL_PATH = snapshot_download(MODEL_ID)  # Hoặc đường dẫn model đã gắn trong /kaggle/input/...
+METHOD = 'prod'  # prod | codeeraser | grad_diff | simnpo | simnpo_gdr | IHL
+USE_LORA = True  # False: full weights, cần nhiều VRAM hơn
+JUDGE_MODEL = 'gpt-4'  # Đổi thành model judge mà tài khoản của bạn có quyền sử dụng
+JUDGE_URL = 'https://api.openai.com/v1/chat/completions'
+os.environ['JUDGE_API_KEY'] = UserSecretsClient().get_secret('JUDGE_API_KEY')
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-```text
-unlearning/datasets/malicious_code_origin.jsonl.zip
+assert torch.cuda.is_available(), 'Hãy bật GPU trong Notebook Settings.'
+DTYPE = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
+RUN = Path('/kaggle/working/experiments') / datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
+RUN.mkdir(parents=True, exist_ok=True)
+print('Lưu lại đường dẫn này:', RUN)
+
+def run_script(script, *args):
+    subprocess.run([sys.executable, script, *map(str, args)], check=True)
+
+(RUN / 'settings.json').write_text(json.dumps(dict(
+    model_family=MODEL_FAMILY, model_id=MODEL_ID, model_path=MODEL_PATH,
+    method=METHOD, lora=USE_LORA, judge_model=JUDGE_MODEL, judge_url=JUDGE_URL,
+    dtype=DTYPE, generation_limit=1024), indent=2))
 ```
 
-Extract it from the `unlearning/` directory:
+Để dùng DeepSeek 6.7B, đổi `MODEL_FAMILY='deepseek-coder-6.7b'` và
+`MODEL_ID='deepseek-ai/deepseek-coder-6.7b-instruct'`. Model 6.7B cùng reference
+có thể không vừa VRAM Kaggle, kể cả dùng LoRA. Ví dụ này chạy **một GPU**.
 
-```bash
-unzip datasets/malicious_code_origin.jsonl.zip -d datasets/
+## Cell 3 — chuẩn bị dữ liệu gốc và retain
+
+Dữ liệu gốc có sẵn trong repo (1.283 mẫu). Retain là code sạch, không phải kết quả jailbreak.
+
+```python
+import zipfile, shutil
+
+SOURCE = RUN / 'malicious_original.jsonl'
+with zipfile.ZipFile('datasets/malicious_code_origin.jsonl.zip') as archive:
+    SOURCE.write_bytes(archive.read('malicious_code_origin.jsonl'))
+RETAIN = RUN / 'retain.jsonl'
+run_script('datasets/prepare_data.py')
+shutil.copy2('/kaggle/working/python_code_18k.jsonl', RETAIN)
+print('Original:', sum(1 for _ in SOURCE.open()))
+print('Retain:', sum(1 for _ in RETAIN.open()))
 ```
 
-The extracted file can be used as the initial malicious dataset:
+## Cell 4 — jailbreak model ban đầu
 
-```text
-datasets/malicious_code_origin.jsonl
+```python
+BEFORE = RUN / 'jailbreak_before.jsonl'
+run_script('jailbreak.py', f'model_family={MODEL_FAMILY}', f'model_path={MODEL_PATH}',
+           f'data_path={SOURCE}', f'output_path={BEFORE}',
+           f'torch_dtype={DTYPE}', 'max_new_tokens=1024', 'temperature=0.1', 'seed=42')
 ```
 
-Original source: [pypi_malregistry](https://github.com/lxyeternal/pypi_malregistry)
+Script lưu từng mẫu xuống đĩa và không ghi đè file cũ. Nếu phiên generation bị
+ngắt, giữ file dở để kiểm tra và chọn đường dẫn output mới để chạy lại đầy đủ.
 
-### 1.2 Optional: Collect the Malicious Dataset Yourself
+## Cell 5 — judge và tạo forget set
 
-If you want to rebuild the malicious dataset from PyPI malware package archives, use the collection pipeline in `unlearning/datasets/collect_malicious.py`.
+Judge tiếp tục từ những dòng đã lưu khi chạy lại cùng lệnh. Forget set dùng
+**`predicted_answer` được gắn BAD**, không dùng đáp án gốc thay thế.
 
-First, clone the source malware registry into the repository data directory:
-
-```bash
-cd /path/to/llm-detoxification
-mkdir -p data
-git clone https://github.com/lxyeternal/pypi_malregistry.git data/pypi_malregistry
+```python
+LABELS_BEFORE = RUN / 'labels_before.jsonl'
+FORGET = RUN / 'forget.jsonl'
+run_script('evals/judge_jsonl.py', '--input', BEFORE, '--output', LABELS_BEFORE,
+           '--forget-output', FORGET, '--model', JUDGE_MODEL, '--url', JUDGE_URL)
+print('Forget:', sum(1 for _ in FORGET.open()))
 ```
 
-Then run the full pipeline:
+## Cell 6 — chạy unlearning
 
-```bash
-python -m unlearning.datasets.collect_malicious all \
-  --repo-dir data/pypi_malregistry \
-  --extracted-dir data/pypi_extracted \
-  --raw-output data/malicious_snippets.jsonl \
-  --clean-output data/malicious_clean.jsonl \
-  --qa-output unlearning/datasets/malicious_code_origin.jsonl \
-  --workers 4
+Mỗi lần chạy tạo thư mục kết quả mới. `prod` và `codeeraser` chọn cấu hình riêng
+để giữ hyperparameter từ repo gốc; các method còn lại dùng `forget.yaml`.
+PROD chỉ học trên forget set, retain chỉ dùng cho metrics.
+
+```python
+CONFIG = METHOD if METHOD in ('prod', 'codeeraser') else 'forget'
+TRAIN_ROOT = RUN / 'training'
+existing = set(TRAIN_ROOT.glob('*')) if TRAIN_ROOT.exists() else set()
+command = [sys.executable, '-m', 'torch.distributed.run', '--nproc_per_node=1',
+           '--master_port=29500', 'forget.py', '--config-path', './config', '--config-name', CONFIG,
+           f'forget_loss={METHOD}', f'model_family={MODEL_FAMILY}', f'model_path={MODEL_PATH}',
+           f'forget_data_path={FORGET}', f'retain_data_path={RETAIN}',
+           f'LoRA.enabled={str(USE_LORA).lower()}', 'importance_file=null',
+           f'tracking.output_dir={TRAIN_ROOT}', 'precision=auto']
+# Thêm override tại đây nếu cần; chúng sẽ được lưu trong config của lần chạy.
+# command += ['LoRA.r=320', 'LoRA.alpha=640', 'LoRA.targets=self_attn']
+subprocess.run(command, check=True)
+created = set(TRAIN_ROOT.glob('*')) - existing
+assert len(created) == 1, f'Kiểm tra thư mục kết quả: {TRAIN_ROOT}'
+TRAIN_RUN = created.pop()
+TRAINED_MODEL = TRAIN_RUN / 'model'
+(RUN / 'trained_model_path.txt').write_text(str(TRAINED_MODEL))
+print('Checkpoint:', TRAINED_MODEL)
 ```
 
-The pipeline performs four stages:
+PROD mặc định: lr `5e-6`, 10 epochs, batch 1, accumulation 32, top-p `0.8`,
+alpha `0`; CodeEraser: lr `3e-6`, tối đa 100 epochs theo config (không có early
+stopping). Muốn chạy thử ngắn có thể thêm `num_epochs=1`, nhưng đó là override.
+PROD giữ redistribution, frozen reference và loss gốc; phần QA chỉ tính trên
+answer hợp lệ, bỏ prompt/padding và xử lý cả token answer đầu tiên.
+`max_length` giới hạn chuỗi huấn luyện; `max_new_tokens=1024` là giới hạn sinh khi jailbreak.
 
-1. `extract`: safely extracts `.tar.gz`, `.zip`, `.whl`, `.egg`, and related archives.
-2. `scan`: scans Python files for suspicious code snippets using AST blocks and regex pattern groups.
-3. `filter`: removes noisy, duplicated, too-short, too-long, or likely false-positive snippets.
-4. `convert`: converts the cleaned snippets into the repository training format:
+## Cell 7 — jailbreak và judge sau unlearning
 
-```json
-{"question": "...", "answer": "..."}
+Dùng lại **toàn bộ dữ liệu gốc**, cùng seed/tham số generation và cùng judge.
+Transformers/PEFT nạp adapter nếu checkpoint là LoRA; giữ nguyên model base ở
+`MODEL_PATH` để adapter có thể được nạp lại.
+
+```python
+AFTER = RUN / 'jailbreak_after.jsonl'
+LABELS_AFTER = RUN / 'labels_after.jsonl'
+run_script('jailbreak.py', f'model_family={MODEL_FAMILY}', f'model_path={TRAINED_MODEL}',
+           f'data_path={SOURCE}', f'output_path={AFTER}', f'torch_dtype={DTYPE}',
+           'max_new_tokens=1024', 'temperature=0.1', 'seed=42')
+run_script('evals/judge_jsonl.py', '--input', AFTER, '--output', LABELS_AFTER,
+           '--model', JUDGE_MODEL, '--url', JUDGE_URL)
 ```
 
-You can also run each stage separately:
+## Cell 8 — xem kết quả và sao lưu
 
-```bash
-python -m unlearning.datasets.collect_malicious extract \
-  --repo-dir data/pypi_malregistry \
-  --out-dir data/pypi_extracted
+```python
+import pandas as pd
 
-python -m unlearning.datasets.collect_malicious scan \
-  --extracted-dir data/pypi_extracted \
-  --output data/malicious_snippets.jsonl \
-  --workers 4
+comparison = []
+for phase, path in [('before', LABELS_BEFORE), ('after', LABELS_AFTER)]:
+    summary = json.loads(path.with_suffix('.summary.json').read_text())
+    comparison.append(dict(phase=phase, total=summary['total'],
+                           **summary['counts'], bad_rate=summary['bad_rate']))
+comparison = pd.DataFrame(comparison)
+comparison.to_csv(RUN / 'jailbreak_comparison.csv', index=False)
+display(comparison)
+run_script('summarize_run.py', TRAIN_RUN)
+print('Tất cả kết quả:', RUN)
+print('Các bảng thống kê:', sorted(str(p.relative_to(RUN)) for p in RUN.rglob('*.csv')))
 
-python -m unlearning.datasets.collect_malicious filter \
-  --input data/malicious_snippets.jsonl \
-  --output data/malicious_clean.jsonl
-
-python -m unlearning.datasets.collect_malicious convert \
-  --input data/malicious_clean.jsonl \
-  --output unlearning/datasets/malicious_code_origin.jsonl \
-  --cut-ratio 0.3
+# Bản ZIP chứa bảng, config và kết quả generation; model nằm riêng trong RUN.
+archive_path = RUN.parent / f'{RUN.name}_reports.zip'
+with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+    for path in RUN.rglob('*'):
+        if path.is_file() and 'model' not in path.relative_to(RUN).parts:
+            archive.write(path, path.relative_to(RUN))
+print('Báo cáo:', archive_path)
 ```
 
-Useful options:
+Chọn **Save Version → Save & Run All → Save output** trên Kaggle để giữ cả
+checkpoint và kết quả trong `/kaggle/working`. Chỉ chạy cell chưa đảm bảo dữ liệu
+còn sau khi session bị xóa. Tỷ lệ BAD trên tập đã dùng chọn forget là kết quả
+trên tập đó; không coi là đánh giá held-out.
 
-```bash
-python -m unlearning.datasets.collect_malicious --help
-python -m unlearning.datasets.collect_malicious scan --help
-python -m unlearning.datasets.collect_malicious filter --help
-python -m unlearning.datasets.collect_malicious convert --help
-```
+Trong `training/<run>/`: `model/`, config/source snapshot, thông tin tham số,
+metrics từng sample trước/sau, log training, CPU/RAM/GPU và bảng tổng hợp.
+MA/PPL trong tracking dùng teacher forcing (mặc định 512 token), không tương
+đương ASR, HumanEval hay PDR của bài báo. Các benchmark bổ sung nằm trong
+`bigcode-evaluation/`.
 
-### 1.3 Normal Python Dataset
-
-To download and prepare the clean Python code retain dataset from Hugging Face, run:
-
-```bash
-cd unlearning
-python datasets/prepare_data.py
-```
-
-This creates:
-
-```text
-python_code_18k.jsonl
-```
-
-If needed, move it into `unlearning/datasets/` or update the training command paths accordingly.
-
----
-
-## Step 2: Jailbreak Attack
-
-Run `jailbreak.py` with a system prompt and prefix injection to generate malicious completions from the target model.
-
-```bash
-cd unlearning
-python jailbreak.py \
-  model_family=deepseek-coder-6.7b \
-  model_path=models/deepseek-coder-6.7b-instruct \
-  data_path=datasets/malicious_code_origin.jsonl \
-  output_path=datasets/predictions.jsonl
-```
-
-Default parameters can be edited in:
-
-```text
-unlearning/config/jailbreak.yaml
-```
-
----
-
-## Step 3: Maliciousness Evaluation
-
-Evaluate the completions generated in Step 2 with the LLM-as-a-judge evaluator:
-
-```bash
-cd unlearning
-python evals/eval_malicious.py
-```
-
-The output labels are used to identify samples where jailbreak succeeded.
-
----
-
-## Step 4: Extract the Final Forget Set
-
-From the labeled results in Step 3, keep examples with a `BAD` label. These examples represent prompts where the model generated malicious code and should be used as the final forget set.
-
-Save the filtered data as a JSONL file with the same schema:
-
-```json
-{"question": "...", "answer": "..."}
-```
-
-Example path used by the commands below:
-
-```text
-unlearning/datasets/deepseek6.7b_bad.jsonl
-```
-
----
-
-## Step 5: Model Unlearning
-
-Run `forget.py` to unlearn the malicious behavior using one of the supported objectives. The examples below use DeepSeek-Coder as an illustration; change `model_family`, `model_path`, and dataset paths for your own model.
-
-### Option A: Importance-based Hashed Loss (IHL)
-
-IHL uses LoRA for parameter-efficient unlearning.
-
-```bash
-cd unlearning
-torchrun \
-  --nproc_per_node=1 \
-  --master_addr=localhost \
-  --master_port=29500 \
-  forget.py \
-  --config-path ./config \
-  --config-name forget \
-  forget_data_path=datasets/deepseek6.7b_bad.jsonl \
-  retain_data_path=datasets/python_code_18k.jsonl \
-  model_family=deepseek-coder-6.7b \
-  model_path=models/deepseek-coder-6.7b-instruct \
-  forget_loss=IHL \
-  importance_file=null \
-  'LoRA.r=16' \
-  'LoRA.alpha=32' \
-  'LoRA.targets=all' \
-  'LoRA.dropout=0.05' \
-  num_epochs=5 \
-  lr=1e-5 \
-  batch_size=2 \
-  gradient_accumulation_steps=16 \
-  max_length=2048
-```
-
-### Option B: Gradient Difference
-
-Gradient Difference maximizes loss on the forget set while minimizing loss on the retain set.
-
-```bash
-cd unlearning
-torchrun \
-  --nproc_per_node=1 \
-  --master_addr=localhost \
-  --master_port=29500 \
-  forget.py \
-  --config-path ./config \
-  --config-name forget \
-  forget_data_path=datasets/deepseek6.7b_bad.jsonl \
-  retain_data_path=datasets/python_code_18k.jsonl \
-  model_family=deepseek-coder-6.7b \
-  model_path=models/deepseek-coder-6.7b-instruct \
-  forget_loss=grad_diff \
-  importance_file=null \
-  lr=2e-5 \
-  batch_size=2 \
-  gradient_accumulation_steps=85 \
-  num_epochs=1 \
-  max_length=2048
-```
-
-### Option C: SimNPO with Gradient Difference Regularization
-
-SimNPO with GDR optimizes a preference-style unlearning objective with retain-set regularization.
-
-```bash
-cd unlearning
-torchrun \
-  --nproc_per_node=1 \
-  --master_addr=localhost \
-  --master_port=29500 \
-  forget.py \
-  --config-path ./config \
-  --config-name forget \
-  forget_data_path=datasets/deepseek6.7b_bad.jsonl \
-  retain_data_path=datasets/python_code_18k.jsonl \
-  model_family=deepseek-coder-6.7b \
-  model_path=models/deepseek-coder-6.7b-instruct \
-  forget_loss=simnpo_gdr \
-  importance_file=null \
-  num_epochs=10 \
-  lr=1e-5 \
-  batch_size=2 \
-  gradient_accumulation_steps=16 \
-  beta=0.7 \
-  grad_diff_coeff=0.1 \
-  npo_coeff=1.0 \
-  max_length=2048
-```
-
-LoRA is enabled for `IHL` and disabled for `grad_diff` and `simnpo_gdr`.
-
----
-
-## Step 6: Post-Unlearning Evaluation
-
-Evaluate whether the unlearned model reduces memorization of the forget set while preserving retain-set behavior:
-
-```bash
-cd unlearning
-python evals/eval_memorize.py \
-  model_family=deepseek-coder-6.7b \
-  model_path=models/deepseek6.7b_unlearned \
-  data_path=datasets/deepseek6.7b_bad.jsonl \
-  output_dir=results \
-  run_name=deepseek6.7b_unlearned \
-  eval_tokens=100
-```
-
-The evaluator reports:
-
-1. **MA (Memorization Accuracy)**: token-level reconstruction accuracy.
-2. **EL (Extraction Likelihood)**: n-gram overlap recall on generated suffixes.
-3. **Loss and PPL**: perplexity on forget and retain samples.
-
-Outputs are saved as:
-
-```text
-{run_name}_per_example.csv
-{run_name}_summary.json
-```
-
----
-
-## Step 7: Downstream Coding and Reasoning Evaluation
-
-Use `bigcode-evaluation-harness` to test whether unlearning preserves general coding and reasoning ability.
-
-### 7.1 Setup
-
-```bash
-cd bigcode-evaluation/bigcode-evaluation-harness
-pip install -e .
-```
-
-### 7.2 HumanEval
-
-```bash
-accelerate launch main.py \
-  --model models/deepseek6.7b_unlearned \
-  --tasks instruct-humaneval \
-  --instruction_tokens "<|im_start|>user\n,<|im_end|>\n,<|im_start|>assistant\n" \
-  --max_length_generation 512 \
-  --temperature 0.2 \
-  --do_sample True \
-  --n_samples 1 \
-  --batch_size 1 \
-  --precision fp16 \
-  --allow_code_execution \
-  --save_generations \
-  --metric_output_path results_instruct.json
-```
-
-### 7.3 MBPP
-
-```bash
-accelerate launch main.py \
-  --model models/deepseek6.7b_unlearned \
-  --tasks mbpp \
-  --max_length_generation 512 \
-  --temperature 0.1 \
-  --do_sample True \
-  --n_samples 1 \
-  --batch_size 1 \
-  --precision fp16 \
-  --allow_code_execution \
-  --save_generations \
-  --metric_output_path results_mbpp.json
-```
-
-### 7.4 GSM8K
-
-```bash
-accelerate launch main.py \
-  --model models/deepseek6.7b_unlearned \
-  --tasks pal-gsm8k-greedy \
-  --max_length_generation 2048 \
-  --n_samples 1 \
-  --batch_size 1 \
-  --do_sample False \
-  --trust_remote_code \
-  --precision fp16 \
-  --allow_code_execution \
-  --save_generations \
-  --save_generations_path gsm8k_smoke.json \
-  --metric_output_path gsm8k_smoke_results.json
-```
+Nguồn method: [CodeEraser](https://arxiv.org/abs/2509.13755),
+[PROD](https://ojs.aaai.org/index.php/AAAI/article/view/40398).
+PROD dựa trên `jiangxxxue/PROD` commit `a581364`; giấy phép ở
+`unlearning/licenses/PROD.txt`. Đã kiểm tra số học và Trainer trên CPU;
+chưa kiểm chứng toàn bộ notebook bằng một phiên Kaggle GPU thực tế.

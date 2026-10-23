@@ -1,0 +1,24 @@
+# Author run_PROD.sh / CustomArguments defaults (commit a581364).
+defaults:
+  - forget
+  - _self_
+
+forget_loss: prod
+lr: 5.0e-6
+num_epochs: 10
+batch_size: 1
+gradient_accumulation_steps: 32
+max_length: 1024
+weight_decay: 0.0
+seed: 42
+prod:
+  top_p: 0.8
+  alpha: 0.0
+  temperature: null
+  max_N: null
+LoRA:
+  enabled: null  # Original method uses full weights; true enables the LoRA variant.
+importance_file: null
+eval_while_train: false
+eval_only: false
+save_dir: ${model_path}/prod_lora-${LoRA.enabled}_lr${lr}_${num_epochs}

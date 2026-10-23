@@ -1,0 +1,27 @@
+# Inherit the existing project paths/model settings; override only this method.
+defaults:
+  - forget
+  - _self_
+
+forget_loss: codeeraser
+lr: 3e-6
+control_alpha: 1.0
+control_lambda: 0.1
+select_gamma: 0.1
+num_epochs: 100
+max_length: 512
+retain_max_length: 128
+weight_decay: 0.01
+seed: 42
+
+# Effective batch 32 on one GPU, matching the original k=32 example.
+# With 4 GPUs, use gradient_accumulation_steps=4 instead.
+batch_size: 2
+gradient_accumulation_steps: 16
+LoRA:
+  enabled: null  # CodeEraser defaults to full; override with LoRA.enabled=true.
+  r: 8
+importance_file: null
+eval_while_train: false
+eval_only: false
+save_dir: ${model_path}/codeeraser_lora-${LoRA.enabled}_r${LoRA.r}_lr${lr}_alpha${control_alpha}_lambda${control_lambda}_gamma${select_gamma}_${num_epochs}

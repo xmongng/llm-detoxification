@@ -15,6 +15,8 @@ import numpy as np
 from scipy.stats import ks_2samp, hmean
 import csv 
 from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
+from codeeraser import AlternatingBatchSampler, forget_objective, retain_objective
+from prod import prod_objective
 
 def printll(name, inp):
     #print list with 4 decimal for each item
@@ -127,10 +129,26 @@ class CustomTrainerForgetting(Trainer):
 
         #Add for SimNPO
         self.gamma = kwargs.pop('gamma',0.0)
+        self.control_alpha = kwargs.pop('control_alpha', 1.0)
+        self.control_lambda = kwargs.pop('control_lambda', 0.1)
+        self.select_gamma = kwargs.pop('select_gamma', 0.1)
+        self.prod_settings = kwargs.pop('prod_settings', {})
 
         super(CustomTrainerForgetting, self).__init__(*args, **kwargs)
-        if self.loss_type == "KL" or ("npo" in self.loss_type and "simnpo" not in self.loss_type):
+        if self.loss_type in ('codeeraser', 'prod'):
+            # Our loss is already a mean; Trainer must divide it by accumulation steps.
+            self.model_accepts_loss_kwargs = False
+        if self.loss_type in ("KL", "codeeraser", "prod") or ("npo" in self.loss_type and "simnpo" not in self.loss_type):
             self.oracle_model = self.e_prepare_deepspeed(self.oracle_model)
+
+    def _get_train_sampler(self, train_dataset=None):
+        if self.loss_type == 'codeeraser':
+            dataset = train_dataset if train_dataset is not None else self.train_dataset
+            effective_batch = (self.args.per_device_train_batch_size
+                               * self.args.gradient_accumulation_steps
+                               * self.accelerator.num_processes)
+            return AlternatingBatchSampler(len(dataset), effective_batch, self.seed)
+        return super()._get_train_sampler(train_dataset)
 
     def e_prepare_deepspeed(self, model):
         # Adapted from accelerate: https://github.com/huggingface/accelerate/blob/739b135f8367becb67ffaada12fe76e3aa60fefd/src/accelerate/accelerator.py#L1473
@@ -165,8 +183,36 @@ class CustomTrainerForgetting(Trainer):
     
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        
-        if self.loss_type == "grad_ascent":
+
+        if self.loss_type == 'codeeraser':
+            # global_step changes only after a complete accumulation window.
+            forgetting = self.state.global_step % 2 == 0
+            batch = inputs['forget' if forgetting else 'retain']
+            model_inputs = {key: batch[key] for key in ('input_ids', 'attention_mask')}
+            outputs = model(**model_inputs)
+            with torch.no_grad():
+                reference = self.oracle_model(**model_inputs)
+            if forgetting:
+                loss = forget_objective(outputs.logits, reference.logits, batch['labels'],
+                                        batch['secret_mask'], self.control_lambda,
+                                        self.select_gamma)
+            else:
+                loss = retain_objective(outputs.logits, reference.logits, batch['labels'],
+                                        self.control_alpha, self.control_lambda)
+
+        elif self.loss_type == 'prod':
+            model_inputs = {key: inputs[key] for key in ('input_ids', 'attention_mask')}
+            outputs = model(**model_inputs)
+            with torch.no_grad():
+                reference = self.oracle_model(**model_inputs)
+            loss = prod_objective(outputs.logits, reference.logits, inputs['labels'],
+                                  **self.prod_settings)
+            if model.training:
+                # Upstream sums microbatch gradients. Cancel Trainer's averaging.
+                loss = loss * getattr(self, 'current_gradient_accumulation_steps',
+                                      self.args.gradient_accumulation_steps)
+
+        elif self.loss_type == "grad_ascent":
             
             forget_inputs, retain_inputs = inputs
             input_ids, labels, attention_mask = forget_inputs

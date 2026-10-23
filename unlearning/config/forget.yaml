@@ -2,6 +2,7 @@ model_family: qwen2.5-coder-3b
 model_path: null   
 
 LoRA:
+  enabled: null  # null: method default; true: LoRA; false: all parameters
   targets: all
   r: 8
   alpha: 32
@@ -13,8 +14,10 @@ gradient_accumulation_steps: 4
 num_epochs: 5
 weight_decay: 0.01
 max_length: 500
+precision: auto
+gradient_checkpointing: true
 
-forget_loss: grad_diff   # grad_diff | IHL | simnpo_gdr
+forget_loss: grad_diff   # grad_diff | IHL | simnpo_gdr | codeeraser | prod
 
 # Local JSONL paths
 forget_data_path: data/forget.jsonl
@@ -32,13 +35,37 @@ ref_policy: fine_tuned
 beta: 0.1
 gamma: 0.0
 
+# CodeEraser / SSCU coefficients from code-unlearning.
+control_alpha: 1.0
+control_lambda: 0.1
+select_gamma: 0.1
+retain_max_length: 128
+
+prod:
+  top_p: 0.8
+  alpha: 0.0
+  temperature: null
+  max_N: null
+
 importance_file: null
-save_dir: ${model_path}/${forget_loss}_target-${LoRA.targets}_r-${LoRA.r}_${lr}_${num_epochs}
+save_dir: ${model_path}/${forget_loss}_lora-${LoRA.enabled}_target-${LoRA.targets}_r-${LoRA.r}_${lr}_${num_epochs}
 overwrite_dir: true
 save_model: true
 eval_while_train: false
 eval_only: false
 seed: 42
+
+tracking:
+  enabled: true
+  output_dir: results/unlearning
+  resource_interval_seconds: 2.0
+  log_every_steps: 1
+  sample_metrics: true
+  sample_every_epoch: false
+  sample_max_length: 512
+  sample_seed: ${..seed}
+  max_samples_per_split: null
+  copy_datasets: false
 
 eval:
   model_path: ${..model_path}

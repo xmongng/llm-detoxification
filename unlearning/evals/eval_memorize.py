@@ -22,6 +22,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import re
 import json
 import math
+import time
+import traceback
 import logging
 from pathlib import Path
 from collections import Counter
@@ -38,6 +40,8 @@ from tqdm.auto import tqdm
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from utils import get_model_identifiers_from_yaml
+from experiment_tracking import (CsvJournal, unique_run_dir, atomic_json,
+                                 sample_sha256, file_sha256)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,8 +112,8 @@ class NeoDataset(Dataset):
                         continue
                     obj.setdefault("doc_id", idx)
                     self.data.append(obj)
-                except json.JSONDecodeError:
-                    continue
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f'Invalid JSON at line {idx + 1} in {data_path}') from exc
         assert tokenizer.padding_side == "right"
 
     def __len__(self):
@@ -135,9 +139,6 @@ class NeoDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         prompt_str = self._build_prompt(item)
-        prompt_ids = self.tok(prompt_str, add_special_tokens=False)["input_ids"]
-        prompt_len = min(len(prompt_ids), self.max_len - 1)
-
         gt_str = str(
             item.get("predicted_answer",
             item.get("ground_truth",
@@ -149,13 +150,20 @@ class NeoDataset(Dataset):
             max_length=self.max_len,
             padding="max_length",
             truncation=True,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
             return_tensors="pt",
         )
+        valid_length = int(enc['attention_mask'].sum())
+        prompt_len = next((i for i, (_, end) in enumerate(enc['offset_mapping'][0].tolist())
+                           if end > len(prompt_str)), valid_length)
         return {
             "source_ids":  enc["input_ids"].squeeze(0),
             "source_mask": enc["attention_mask"].squeeze(0),
             "prompt_len":  prompt_len,
             "doc_id":      item["doc_id"],
+            "content_sha256": sample_sha256({'question': str(item.get('question', item.get('code_context', ''))),
+                                              'answer': gt_str}),
         }
 
 
@@ -274,7 +282,7 @@ def compute_el(model, input_ids, prompt_len, eval_tokens, n_grams, device):
     ans_end = min(ans_start + eval_tokens, seq_len)
 
     if ans_start >= ans_end:
-        return {n: 0.0 for n in n_grams}
+        return {n: float('nan') for n in n_grams}
 
     numerator = {n: 0.0 for n in n_grams}
     num_positions = 0
@@ -292,7 +300,7 @@ def compute_el(model, input_ids, prompt_len, eval_tokens, n_grams, device):
             )
             pred = generated[0, i:]  # Generated suffix
         except (IndexError, RuntimeError):
-            continue
+            raise  # Do not silently count failed generations as zero overlap.
 
         pred_cpu = pred.cpu()
         label_cpu = label.cpu()
@@ -317,8 +325,8 @@ def compute_el(model, input_ids, prompt_len, eval_tokens, n_grams, device):
 
     el_scores = {}
     for n in n_grams:
-        denominator = max(1, ans_end - ans_start - (n - 1))
-        el_scores[n] = numerator[n] / denominator if denominator > 0 else 0.0
+        denominator = ans_end - ans_start - (n - 1)
+        el_scores[n] = numerator[n] / denominator if denominator > 0 else float('nan')
 
     return el_scores
 
@@ -344,12 +352,14 @@ def compute_loss(model, input_ids, attention_mask, prompt_len, eval_tokens, devi
     ans_end = min(ans_start + eval_tokens, seq_len)
 
     ids = input_ids.unsqueeze(0).to(device)
+    if ans_end <= max(1, ans_start):
+        return float('nan')
     mask = attention_mask.unsqueeze(0).to(device)
 
     lm_labels = ids.clone()
     lm_labels[0, :ans_start] = -100
 
-    lm_labels[lm_labels == model.config.pad_token_id if hasattr(model.config, 'pad_token_id') else -1] = -100
+    lm_labels[mask == 0] = -100
 
     outputs = model(input_ids=ids, attention_mask=mask, labels=lm_labels)
 
@@ -362,8 +372,8 @@ def compute_loss(model, input_ids, attention_mask, prompt_len, eval_tokens, devi
     )
 
     # Only average over the answer region
-    ans_loss = loss_per_token[ans_start : ans_end - 1]
-    valid = shift_labels[0, ans_start : ans_end - 1] != -100
+    ans_loss = loss_per_token[max(0, ans_start - 1) : ans_end - 1]
+    valid = shift_labels[0, max(0, ans_start - 1) : ans_end - 1] != -100
     valid_loss = ans_loss[valid]
 
     mean_loss = valid_loss.mean().item() if len(valid_loss) > 0 else float("nan")
@@ -374,7 +384,7 @@ def compute_loss(model, input_ids, attention_mask, prompt_len, eval_tokens, devi
 
     return mean_loss
 
-def evaluate(cfg):
+def _evaluate(cfg, output_dir):
     """Run full memorization evaluation: MA + EL + Loss."""
 
     set_seed(cfg.seed)
@@ -388,8 +398,12 @@ def evaluate(cfg):
     torch_dtype = dtype_map.get(cfg.torch_dtype, torch.bfloat16)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    output_dir = Path(cfg.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    atomic_json(output_dir / 'manifest.json', {
+        'run_name': cfg.run_name, 'model_path': str(cfg.model_path), 'model_family': cfg.model_family,
+        'data_path': str(Path(cfg.data_path).resolve()), 'data_sha256': file_sha256(cfg.data_path),
+        'seed': cfg.seed, 'max_length': cfg.max_length, 'eval_tokens': cfg.eval_tokens,
+        'el_n': list(cfg.el_n), 'metric_protocol': 'jailbreak_greedy_answer_v2'})
+    log.info('Evaluation artifacts: %s', output_dir)
 
     model_cfg = get_model_identifiers_from_yaml(cfg.model_family)
     model_id = model_cfg["hf_key"]
@@ -403,10 +417,8 @@ def evaluate(cfg):
 
 
     pad_added = False
-    if tokenizer.pad_token_id is None or tokenizer.pad_token_id == tokenizer.eos_token_id:
-        tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
-        pad_added = True
-        log.info("Added <|pad|> token (id=%d)", tokenizer.pad_token_id)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     load_kwargs = dict(
         trust_remote_code=True,
@@ -422,6 +434,7 @@ def evaluate(cfg):
         model.resize_token_embeddings(len(tokenizer))
     _fix_generation_config(model, tokenizer)
     model.eval()
+    device = model.get_input_embeddings().weight.device
 
     # Memory info
     if torch.cuda.is_available():
@@ -439,57 +452,73 @@ def evaluate(cfg):
     n_grams = list(cfg.el_n)
 
     all_rows = []
+    fields = ['sample_index', 'doc_id', 'content_sha256', 'metric_protocol', 'status', 'answer_tokens',
+              'evaluation_seconds', 'loss', 'ppl', 'ma'] + [f'el_{n}gram' for n in n_grams]
+    journal = CsvJournal(output_dir / f'{cfg.run_name}_per_example.csv', fields)
 
-    for sample_idx in tqdm(range(len(dataset)), desc=f"Evaluating [{cfg.run_name}]"):
-        sample = dataset[sample_idx]
-        input_ids = sample["source_ids"]
-        attention_mask = sample["source_mask"]
-        prompt_len = int(sample["prompt_len"])
-        doc_id = int(sample["doc_id"])
+    try:
+        for sample_idx in tqdm(range(len(dataset)), desc=f"Evaluating [{cfg.run_name}]"):
+            sample = dataset[sample_idx]
+            input_ids = sample["source_ids"]
+            attention_mask = sample["source_mask"]
+            valid_length = int(attention_mask.sum())
+            input_ids = input_ids[:valid_length]
+            attention_mask = attention_mask[:valid_length]
+            prompt_len = int(sample["prompt_len"])
+            doc_id = sample['doc_id']
+            sample_started = time.perf_counter()
 
-        loss = compute_loss(
-            model, input_ids, attention_mask,
-            prompt_len, cfg.eval_tokens, device,
-        )
-
-        #MA
-        ma_score, _, _ = compute_ma(
-            model, input_ids,
-            prompt_len, cfg.eval_tokens, device,
-        )
-
-        #EL 
-        el_scores = compute_el(
-            model, input_ids,
-            prompt_len, cfg.eval_tokens, n_grams, device,
-        )
-
-        row = {
-            "doc_id": doc_id,
-            "loss": loss,
-            "ppl": math.exp(loss) if not math.isnan(loss) else float("nan"),
-            "ma": ma_score,
-        }
-        for n in n_grams:
-            row[f"el_{n}gram"] = el_scores[n]
-
-        all_rows.append(row)
-
-        # Periodic logging
-        if (sample_idx + 1) % 50 == 0:
-            _df = pd.DataFrame(all_rows)
-            log.info(
-                "[%d/%d] MA=%.4f  EL_%d=%.4f  Loss=%.4f",
-                sample_idx + 1, len(dataset),
-                _df["ma"].mean(),
-                n_grams[0], _df[f"el_{n_grams[0]}gram"].mean(),
-                _df["loss"].mean(),
+            loss = compute_loss(
+                model, input_ids, attention_mask,
+                prompt_len, cfg.eval_tokens, device,
             )
 
+            #MA
+            ma_score, _, _ = compute_ma(
+                model, input_ids,
+                prompt_len, cfg.eval_tokens, device,
+            )
 
-    df = pd.DataFrame(all_rows)
+            # EL
+            el_scores = compute_el(
+                model, input_ids,
+                prompt_len, cfg.eval_tokens, n_grams, device,
+            )
+
+            row = {
+                'sample_index': sample_idx,
+                "doc_id": doc_id,
+                'content_sha256': sample['content_sha256'],
+                'metric_protocol': 'jailbreak_greedy_answer_v2',
+                'status': 'ok' if prompt_len < valid_length else 'no_answer_tokens',
+                'answer_tokens': max(0, min(cfg.eval_tokens, valid_length - prompt_len)),
+                'evaluation_seconds': time.perf_counter() - sample_started,
+                "loss": loss,
+                "ppl": math.exp(loss) if math.isfinite(loss) and loss < 709 else float("nan"),
+                "ma": ma_score,
+            }
+            for n in n_grams:
+                row[f"el_{n}gram"] = el_scores[n]
+
+            all_rows.append(row)
+            journal.write(row)
+
+            # Periodic logging
+            if (sample_idx + 1) % 50 == 0:
+                _df = pd.DataFrame(all_rows)
+                log.info(
+                    "[%d/%d] MA=%.4f  EL_%d=%.4f  Loss=%.4f",
+                    sample_idx + 1, len(dataset),
+                    _df["ma"].mean(),
+                    n_grams[0], _df[f"el_{n_grams[0]}gram"].mean(),
+                    _df["loss"].mean(),
+                )
+
+
+    finally:
+        journal.close()
+    df = pd.DataFrame(all_rows, columns=fields)
     csv_path = output_dir / f"{cfg.run_name}_per_example.csv"
-    df.to_csv(csv_path, index=False)
     log.info("Per-example results saved to %s", csv_path)
 
     summary = {
@@ -503,16 +532,19 @@ def evaluate(cfg):
         },
         "metrics": {
             "loss": {
+                "count": int(df['loss'].count()),
                 "mean": float(df["loss"].mean()),
                 "std":  float(df["loss"].std()),
             },
             "perplexity": float(np.exp(df["loss"].mean())),
             "ma": {
+                "count": int(df['ma'].count()),
                 "mean": float(df["ma"].mean()),
                 "std":  float(df["ma"].std()),
             },
             "el": {
                 f"el_{n}gram": {
+                    "count": int(df[f'el_{n}gram'].count()),
                     "mean": float(df[f"el_{n}gram"].mean()),
                     "std":  float(df[f"el_{n}gram"].std()),
                 }
@@ -520,10 +552,12 @@ def evaluate(cfg):
             },
         },
         "num_samples": len(df),
+        'status_counts': df['status'].value_counts().to_dict(),
+        'aggregation': 'Sample means/std; perplexity is exp(mean per-sample loss). Missing metrics excluded.',
     }
     json_path = output_dir / f"{cfg.run_name}_summary.json"
-    with open(json_path, "w") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
+    atomic_json(json_path, summary)
+    atomic_json(output_dir / 'status.json', {'status': 'completed', 'num_samples': len(df)})
 
     print("\n" + "=" * 60)
     print(f"  SUMMARY — {cfg.run_name}")
@@ -540,6 +574,16 @@ def evaluate(cfg):
     print("=" * 60)
 
     return df
+
+
+def evaluate(cfg):
+    output_dir = unique_run_dir(cfg.output_dir, cfg.run_name)
+    atomic_json(output_dir / 'status.json', {'status': 'running'})
+    try:
+        return _evaluate(cfg, output_dir)
+    except BaseException:
+        atomic_json(output_dir / 'status.json', {'status': 'failed', 'error': traceback.format_exc()})
+        raise
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="eval_memorize")

@@ -37,3 +37,14 @@ env/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+# Local experiment outputs and secrets
+.env
+*.log
+wandb/
+outputs/
+results/
+models/
+unlearning/data/
+unlearning/python_code_18k.jsonl
+unlearning/datasets/*.jsonl

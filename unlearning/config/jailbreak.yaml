@@ -4,7 +4,7 @@ model_path: /kaggle/working/merged_model
 data_path: /kaggle/input/datasets/mongnguynkin/1283-malicious/malicious_qa.jsonl
 output_path: datasets/predictions.jsonl
 
-max_new_tokens: 512
+max_new_tokens: 1024
 temperature: 0.1
 seed: 42
 device_map: auto
