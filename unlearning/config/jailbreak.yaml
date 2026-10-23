@@ -9,3 +9,7 @@ temperature: 0.1
 seed: 42
 device_map: auto
 torch_dtype: bfloat16 # float16 | bfloat16 | float32
+
+# One complete model per GPU; independent input shards are merged in input order.
+num_gpus: auto  # auto: all visible GPUs; 1: single GPU; 0: CPU
+batch_size: 4  # Per GPU; reduce to 2 or 1 if prompts exhaust VRAM.

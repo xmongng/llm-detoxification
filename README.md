@@ -48,6 +48,9 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 assert torch.cuda.is_available(), 'Hãy bật GPU trong Notebook Settings.'
 DTYPE = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
+JAILBREAK_GPUS = torch.cuda.device_count()  # Kaggle T4 x2: dùng cả 2 GPU
+JAILBREAK_BATCH = 4  # Mỗi GPU; giảm còn 2 hoặc 1 nếu hết VRAM
+print('GPU inference:', JAILBREAK_GPUS, '— batch/GPU:', JAILBREAK_BATCH)
 RUN = Path('/kaggle/working/experiments') / datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
 RUN.mkdir(parents=True, exist_ok=True)
 print('Lưu lại đường dẫn này:', RUN)
@@ -58,12 +61,14 @@ def run_script(script, *args):
 (RUN / 'settings.json').write_text(json.dumps(dict(
     model_family=MODEL_FAMILY, model_id=MODEL_ID, model_path=MODEL_PATH,
     method=METHOD, lora=USE_LORA, judge_model=JUDGE_MODEL, judge_url=JUDGE_URL,
-    dtype=DTYPE, generation_limit=1024), indent=2))
+    dtype=DTYPE, generation_limit=1024,
+    jailbreak_gpus=JAILBREAK_GPUS, jailbreak_batch=JAILBREAK_BATCH), indent=2))
 ```
 
 Để dùng DeepSeek 6.7B, đổi `MODEL_FAMILY='deepseek-coder-6.7b'` và
 `MODEL_ID='deepseek-ai/deepseek-coder-6.7b-instruct'`. Model 6.7B cùng reference
-có thể không vừa VRAM Kaggle, kể cả dùng LoRA. Ví dụ này chạy **một GPU**.
+có thể không vừa VRAM Kaggle, kể cả dùng LoRA. Jailbreak tự dùng mọi GPU nhìn thấy;
+cell unlearning vẫn chạy **một GPU** để giữ cấu hình training hiện tại.
 
 ## Cell 3 — chuẩn bị dữ liệu gốc và retain
 
@@ -88,11 +93,17 @@ print('Retain:', sum(1 for _ in RETAIN.open()))
 BEFORE = RUN / 'jailbreak_before.jsonl'
 run_script('jailbreak.py', f'model_family={MODEL_FAMILY}', f'model_path={MODEL_PATH}',
            f'data_path={SOURCE}', f'output_path={BEFORE}',
-           f'torch_dtype={DTYPE}', 'max_new_tokens=1024', 'temperature=0.1', 'seed=42')
+           f'torch_dtype={DTYPE}', f'num_gpus={JAILBREAK_GPUS}', f'batch_size={JAILBREAK_BATCH}',
+           'max_new_tokens=1024', 'temperature=0.1', 'seed=42')
 ```
 
-Script lưu từng mẫu xuống đĩa và không ghi đè file cũ. Nếu phiên generation bị
-ngắt, giữ file dở để kiểm tra và chọn đường dẫn output mới để chạy lại đầy đủ.
+Trên T4 x2, mỗi GPU giữ một bản model 1.5B ở FP16 và sinh batch riêng.
+File `.jsonl.shards/` giữ kết quả từng GPU; file JSONL cuối chỉ được xuất khi
+đã đủ mẫu, đúng thứ tự. File `.jsonl.summary.json` lưu tổng thời gian,
+samples/giây và peak VRAM từng GPU. Không ghi đè kết quả cũ.
+Nếu generation bị ngắt hoặc hết VRAM, giữ shards để kiểm tra, giảm batch nếu
+cần và dùng output path mới để chạy lại. Giữ **cùng số GPU, batch và seed** ở
+hai lần trước/sau: batching thay đổi luồng sampling so với bản chạy từng mẫu.
 
 ## Cell 5 — judge và tạo forget set
 
@@ -152,6 +163,7 @@ AFTER = RUN / 'jailbreak_after.jsonl'
 LABELS_AFTER = RUN / 'labels_after.jsonl'
 run_script('jailbreak.py', f'model_family={MODEL_FAMILY}', f'model_path={TRAINED_MODEL}',
            f'data_path={SOURCE}', f'output_path={AFTER}', f'torch_dtype={DTYPE}',
+           f'num_gpus={JAILBREAK_GPUS}', f'batch_size={JAILBREAK_BATCH}',
            'max_new_tokens=1024', 'temperature=0.1', 'seed=42')
 run_script('evals/judge_jsonl.py', '--input', AFTER, '--output', LABELS_AFTER,
            '--model', JUDGE_MODEL, '--url', JUDGE_URL)
@@ -172,6 +184,8 @@ comparison.to_csv(RUN / 'jailbreak_comparison.csv', index=False)
 display(comparison)
 run_script('summarize_run.py', TRAIN_RUN)
 print('Tất cả kết quả:', RUN)
+for path in (BEFORE, AFTER):
+    print(path.name, json.loads(Path(str(path) + '.summary.json').read_text()))
 print('Các bảng thống kê:', sorted(str(p.relative_to(RUN)) for p in RUN.rglob('*.csv')))
 
 # Bản ZIP chứa bảng, config và kết quả generation; model nằm riêng trong RUN.
