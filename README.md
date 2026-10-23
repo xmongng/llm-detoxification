@@ -3,9 +3,8 @@
 Luồng: **dữ liệu gốc → jailbreak → judge → lọc BAD → unlearning → đánh giá lại**.
 Copy mỗi khối code bên dưới vào một cell Python, chạy theo thứ tự.
 
-Bật **GPU** và **Internet** trong Notebook Settings. Thêm Kaggle Secret
-`JUDGE_API_KEY` cho dịch vụ judge tương thích Chat Completions. Judge gửi prompt
-và câu trả lời tới dịch vụ đó và có thể phát sinh phí.
+Bật **GPU** và **Internet** trong Notebook Settings. Chạy xong jailbreak mới
+cấu hình API và key ở cell đánh giá.
 Mặc định dùng Qwen2.5-Coder-1.5B-Instruct và PROD + LoRA cho GPU nhỏ;
 đây là biến thể LoRA, không phải cấu hình full-weight của bài báo.
 
@@ -26,24 +25,18 @@ os.chdir(REPO / 'unlearning')
 Nếu notebook đã import torch/transformers trước khi cài, restart session rồi
 chạy lại các cell. Không cần cài FlashAttention.
 
-## Cell 2 — cấu hình chung
+## Cell 2 — chọn model, GPU và thư mục kết quả
 
-Chỉ sửa các biến ở cell này. Khi tiếp tục phiên cũ, đặt `RUN` về đúng thư mục cũ.
+Khi tiếp tục phiên cũ, đặt `RUN` về đúng thư mục cũ.
 
 ```python
 import json, torch
 from datetime import datetime, timezone
 from huggingface_hub import snapshot_download
-from kaggle_secrets import UserSecretsClient
 
 MODEL_FAMILY = 'qwen2.5-coder-1.5b'
 MODEL_ID = 'Qwen/Qwen2.5-Coder-1.5B-Instruct'
 MODEL_PATH = snapshot_download(MODEL_ID)  # Hoặc đường dẫn model đã gắn trong /kaggle/input/...
-METHOD = 'prod'  # prod | codeeraser | grad_diff | simnpo | simnpo_gdr | IHL
-USE_LORA = True  # False: full weights, cần nhiều VRAM hơn
-JUDGE_MODEL = 'gpt-4'  # Đổi thành model judge mà tài khoản của bạn có quyền sử dụng
-JUDGE_URL = 'https://api.openai.com/v1/chat/completions'
-os.environ['JUDGE_API_KEY'] = UserSecretsClient().get_secret('JUDGE_API_KEY')
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 assert torch.cuda.is_available(), 'Hãy bật GPU trong Notebook Settings.'
@@ -60,7 +53,6 @@ def run_script(script, *args):
 
 (RUN / 'settings.json').write_text(json.dumps(dict(
     model_family=MODEL_FAMILY, model_id=MODEL_ID, model_path=MODEL_PATH,
-    method=METHOD, lora=USE_LORA, judge_model=JUDGE_MODEL, judge_url=JUDGE_URL,
     dtype=DTYPE, generation_limit=1024,
     jailbreak_gpus=JAILBREAK_GPUS, jailbreak_batch=JAILBREAK_BATCH), indent=2))
 ```
@@ -105,12 +97,26 @@ Nếu generation bị ngắt hoặc hết VRAM, giữ shards để kiểm tra, g
 cần và dùng output path mới để chạy lại. Giữ **cùng số GPU, batch và seed** ở
 hai lần trước/sau: batching thay đổi luồng sampling so với bản chạy từng mẫu.
 
-## Cell 5 — judge và tạo forget set
+## Cell 5 — cấu hình API, judge và tạo forget set
+
+Đến bước này mới thêm Kaggle Secret `JUDGE_API_KEY` và bật quyền truy cập cho
+notebook. Đặt model và endpoint của dịch vụ bạn sử dụng bên dưới. Judge gửi
+prompt/câu trả lời tới dịch vụ đó và có thể phát sinh phí; key không được lưu
+vào file kết quả.
 
 Judge tiếp tục từ những dòng đã lưu khi chạy lại cùng lệnh. Forget set dùng
 **`predicted_answer` được gắn BAD**, không dùng đáp án gốc thay thế.
 
 ```python
+from kaggle_secrets import UserSecretsClient
+
+assert BEFORE.is_file(), 'Chạy xong cell jailbreak trước khi đánh giá.'
+JUDGE_MODEL = 'gpt-4'  # Model judge mà tài khoản có quyền sử dụng
+JUDGE_URL = 'https://api.openai.com/v1/chat/completions'
+os.environ['JUDGE_API_KEY'] = UserSecretsClient().get_secret('JUDGE_API_KEY')
+(RUN / 'judge_settings.json').write_text(json.dumps(dict(
+    model=JUDGE_MODEL, url=JUDGE_URL), indent=2))
+
 LABELS_BEFORE = RUN / 'labels_before.jsonl'
 FORGET = RUN / 'forget.jsonl'
 run_script('evals/judge_jsonl.py', '--input', BEFORE, '--output', LABELS_BEFORE,
@@ -125,6 +131,13 @@ Mỗi lần chạy tạo thư mục kết quả mới. `prod` và `codeeraser` c
 PROD chỉ học trên forget set, retain chỉ dùng cho metrics.
 
 ```python
+METHOD = 'prod'  # prod | codeeraser | grad_diff | simnpo | simnpo_gdr | IHL
+USE_LORA = True  # False: full weights, cần nhiều VRAM hơn
+assert FORGET.is_file(), 'Tạo forget set ở cell 5 trước khi unlearning.'
+settings = json.loads((RUN / 'settings.json').read_text())
+settings.update(method=METHOD, lora=USE_LORA)
+(RUN / 'settings.json').write_text(json.dumps(settings, indent=2))
+
 CONFIG = METHOD if METHOD in ('prod', 'codeeraser') else 'forget'
 TRAIN_ROOT = RUN / 'training'
 existing = set(TRAIN_ROOT.glob('*')) if TRAIN_ROOT.exists() else set()
@@ -152,24 +165,38 @@ PROD giữ redistribution, frozen reference và loss gốc; phần QA chỉ tín
 answer hợp lệ, bỏ prompt/padding và xử lý cả token answer đầu tiên.
 `max_length` giới hạn chuỗi huấn luyện; `max_new_tokens=1024` là giới hạn sinh khi jailbreak.
 
-## Cell 7 — jailbreak và judge sau unlearning
+## Cell 7 — jailbreak sau unlearning
 
-Dùng lại **toàn bộ dữ liệu gốc**, cùng seed/tham số generation và cùng judge.
+Dùng lại **toàn bộ dữ liệu gốc**, cùng số GPU, batch, seed/tham số generation.
 Transformers/PEFT nạp adapter nếu checkpoint là LoRA; giữ nguyên model base ở
 `MODEL_PATH` để adapter có thể được nạp lại.
 
 ```python
 AFTER = RUN / 'jailbreak_after.jsonl'
-LABELS_AFTER = RUN / 'labels_after.jsonl'
 run_script('jailbreak.py', f'model_family={MODEL_FAMILY}', f'model_path={TRAINED_MODEL}',
            f'data_path={SOURCE}', f'output_path={AFTER}', f'torch_dtype={DTYPE}',
            f'num_gpus={JAILBREAK_GPUS}', f'batch_size={JAILBREAK_BATCH}',
            'max_new_tokens=1024', 'temperature=0.1', 'seed=42')
+```
+
+## Cell 8 — judge sau unlearning
+
+Dùng lại cấu hình judge đã lưu ở cell 5 để so sánh trước/sau nhất quán.
+Nếu session đã mất key trong bộ nhớ, cell này lấy lại key từ Kaggle Secrets.
+
+```python
+from kaggle_secrets import UserSecretsClient
+
+assert AFTER.is_file(), 'Chạy xong jailbreak sau unlearning trước khi đánh giá.'
+judge_settings = json.loads((RUN / 'judge_settings.json').read_text())
+JUDGE_MODEL, JUDGE_URL = judge_settings['model'], judge_settings['url']
+os.environ['JUDGE_API_KEY'] = UserSecretsClient().get_secret('JUDGE_API_KEY')
+LABELS_AFTER = RUN / 'labels_after.jsonl'
 run_script('evals/judge_jsonl.py', '--input', AFTER, '--output', LABELS_AFTER,
            '--model', JUDGE_MODEL, '--url', JUDGE_URL)
 ```
 
-## Cell 8 — xem kết quả và sao lưu
+## Cell 9 — xem kết quả và sao lưu
 
 ```python
 import pandas as pd
