@@ -64,16 +64,20 @@ cell unlearning vẫn chạy **một GPU** để giữ cấu hình training hi�
 Với 3B, PROD/CodeEraser còn giữ reference model: chưa kiểm chứng VRAM cho
 training trên T4 16 GB, dù bước jailbreak có thể chạy trên hai GPU.
 
-## Cell 3 — chuẩn bị dữ liệu gốc và retain
+## Cell 3 — chuẩn bị dữ liệu jailbreak và retain
 
-Dữ liệu gốc có sẵn trong repo (1.283 mẫu). Retain là code sạch, không phải kết quả jailbreak.
+Dữ liệu tổng hợp gồm 1.940 mẫu duy nhất (1.250 mẫu gốc đã lọc và 690 mẫu PyPI
+contextual). Gắn dataset vào notebook bằng **Add Input**, chọn file
+`malicious_merged_final.jsonl`, rồi dán đường dẫn Kaggle vào `DATASET_PATH`.
+Retain là code sạch, không phải kết quả jailbreak.
 
 ```python
-import zipfile, shutil
+import shutil
 
+DATASET_PATH = Path('/kaggle/input/YOUR-DATASET-SLUG/malicious_merged_final.jsonl')
+assert DATASET_PATH.is_file(), f'Không tìm thấy dataset: {DATASET_PATH}'
 SOURCE = RUN / 'malicious_original.jsonl'
-with zipfile.ZipFile('datasets/malicious_code_origin.jsonl.zip') as archive:
-    SOURCE.write_bytes(archive.read('malicious_code_origin.jsonl'))
+shutil.copy2(DATASET_PATH, SOURCE)
 RETAIN = RUN / 'retain.jsonl'
 run_script('datasets/prepare_data.py')
 shutil.copy2('/kaggle/working/python_code_18k.jsonl', RETAIN)
